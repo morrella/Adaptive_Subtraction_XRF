@@ -1,0 +1,452 @@
+#=======================================#
+# Adaptive Subtraction for XRM analysis #
+#         Python version 2.7            #
+#        Author: Alex Morrell           #
+#=======================================#
+
+#=======================================#
+#           User Variables              #
+#=======================================#
+data_name  = '85870.dat'       #       include extension           #
+i0_name    = '85870_i0.dat'    # put file in same folder as script #
+Background = 1.09e-5           # Anything less than this value will be set to 0 #
+number_of_corrections = 1      # How many corrections do you want to perform? if 0 is selected this will correct all #
+
+# 0 = no, 1 = yes #
+Original_Map = 1              # Show the original Map #
+print_progress= 0             # Print progress in command line #
+Show_figs_in_loop = 1         # Show corrected and mask images #
+
+#=======================================#
+#     Modules (spyder 2.3.8 used)       #
+#=======================================#
+import numpy as np
+import matplotlib.pyplot as plt
+import copy
+import scipy
+from scipy.interpolate import *
+from scipy.optimize import curve_fit
+from scipy.integrate import *
+from matplotlib.colors import LogNorm
+
+#=======================================#
+# Importing XRF data from pymca output  #
+#=======================================#
+y, x, Scatter, Cl, K, Ca, Ti = np.loadtxt(data_name, delimiter = '  ', skiprows = 1, usecols = (0, 1, 12, 17, 19, 20, 21), unpack = True)
+nan, I0= np.loadtxt(i0_name, delimiter = '  ', usecols = (1, 2), skiprows = 1, unpack = True)
+x1max, y1max = np.max(x), np.max(y)
+
+#=======================================#
+#           I0 Normalisation            #
+#        (skip if I0 is stable)         #
+#=======================================#
+def I0_norm(x):
+    return (x/I0)* (np.average(I0))
+
+Cl, K, Ca, Ti, I0 = I0_norm(Cl), I0_norm(K), I0_norm(Ca), I0_norm(Ti), I0_norm(I0)
+
+#=======================================#
+#        Reshape into 2D Array          #
+#=======================================#
+def reshape(x):
+    return np.reshape(x, (y1max + 1, x1max + 1))
+
+Cl_mg, K_mg, Ca_mg, Ti_mg = reshape(Cl), reshape(K), reshape(Ca), reshape(Ti)
+
+#=======================================#
+#        Correction Variables           #
+#=======================================#
+Ti_Map = copy.deepcopy(Ti_mg)
+#Ti_Map = Ti_Map[y1 : y2, x1 : x2] #Crop Map if needed#
+
+Ti_Map_Corrected, Ti_Map_Finder = np.asanyarray(copy.deepcopy(Ti_Map)) , np.asanyarray(copy.deepcopy(Ti_Map))
+
+x1, y1 = Ti_Map.shape[1], Ti_Map.shape[0]
+NoPs = int(x1 * y1)
+
+if Original_Map > 0:
+    plt.figure()
+    plt.title ('Original Map')
+    plt.imshow(Ti_Map, interpolation= 'none', norm=LogNorm(vmin=1e-5, vmax=0.03))
+
+if number_of_corrections == 0:
+    highest_correction = (x1, y1)
+    number_of_corrections = np.max(highest_correction)
+    
+iteration_Ti_X , iteration_Ti_Y = range(Ti_Map_Finder.shape[1]), range(Ti_Map_Finder.shape[0])
+number_of_corrections_done = 0
+
+# Tweak Fit #
+constant = 0.3
+hot_particles = 0.0005
+
+
+#=======================================#
+#         Start of Correction           #
+#=======================================#
+#====================================#
+# Loop through the max in Ti Finder  #
+#====================================#
+while number_of_corrections_done < number_of_corrections:
+    for i in iteration_Ti_X:
+        for j in iteration_Ti_Y:
+            if Ti_Map_Finder[j, i] == np.max(Ti_Map_Finder):
+                x2, y2 = i, j
+                number_of_corrections_done += 1
+                
+                #====================================#
+                #      Correction Pixel Number       #
+                #====================================#
+                if print_progress > 0:
+                    print ('Correction Number ' + str(number_of_corrections_done) + ' out of ' + str(number_of_corrections) + '.')
+                    print ('     X = ' + str(x2) + ' Y = ' + str(y2) + '. (' +str(Ti_Map[y2, x2]) + ').')
+            
+                #====================================#
+                #   Define Horizontal and Vertical   #
+                #====================================#
+                HoLine, VeLine = (Ti_Map[y2: (y2+1), :]), (Ti_Map[: , x2: (x2 +1)])
+                HoLine, VeLine = np.ravel(np.transpose(HoLine)), np.ravel(VeLine)
+                HoLineX, VeLineX = np.transpose(np.linspace(0 , (len(HoLine) -1), (len(HoLine)))), np.linspace(0 , (len(VeLine) -1), (len(VeLine)))
+                HoLine_finder, VeLine_finder = copy.deepcopy(HoLine), copy.deepcopy(VeLine)
+                HoLine_finder[0], HoLine_finder[(len(HoLine_finder)-1)]= 0, 0
+                VeLine_finder[0], VeLine_finder[(len(VeLine_finder)-1)]= 0, 0
+ 
+                #====================================#
+                #     Horizontal Anchor Points       #
+                #====================================#              
+                Horizontal_Anchor_Points = 0 , len(HoLine) - 1
+                Peak_Number = 0
+                while np.max(HoLine_finder) > 0 :
+                    iteration1 = range(0, len(HoLine))
+                    for i in iteration1:
+                        if HoLine_finder[i] == np.max(HoLine_finder):
+                            max_index = i
+                    right = HoLine_finder[max_index : ]
+                    left  = np.flipud(HoLine_finder[ : max_index +1])
+                    
+                    #================================#
+                    #     Right anchor iteration     #
+                    #================================# 
+                    iteration_right = range(0, len(right)-1)
+                    for i in iteration_right:
+                        if right[i+1] == 0:
+                            anchor_right = i + 1
+                            break
+                        elif right[0] * constant < right[i+1]:
+                            pass
+                        elif right[i+1] > right[i]:
+                            anchor_right = i
+                            break
+                        elif right[0] > hot_particles:
+                            if right[i+1] < right[0]*0.005:
+                                anchor_right = i +1
+                                break
+                        else:
+                            pass
+             
+                    if anchor_right == 0:
+                        anchor_right= max_index
+                    elif anchor_right > len(right):
+                        anchor_right = len(right) + max_index
+                    else:
+                        anchor_right = anchor_right + max_index                              
+                    Horizontal_Anchor_Points = np.append(Horizontal_Anchor_Points, anchor_right)
+                    
+                    #================================#
+                    #     Left anchor iteration      #
+                    #================================#
+                    iteration_left = range(0, len(left)-1)
+                    for i in iteration_left:
+                        if left[i+1] == 0:
+                            anchor_left = i + 1
+                            break
+                        elif left[0] * constant < left[i+1]:
+                            pass
+                        elif left[i+1] > left[i]:
+                            anchor_left = i
+                            break
+                        elif left[0] > hot_particles:
+                            if left[i+1] < left[0]*0.005:
+                                anchor_left = i +1
+                                break
+                        else:
+                            pass
+                                               
+                    if anchor_left == 0:
+                        anchor_left = max_index
+                    elif (max_index - anchor_left) < 0:
+                        anchor_left = max_index
+                    else:
+                        anchor_left = max_index - anchor_left
+                    Horizontal_Anchor_Points= np.append(Horizontal_Anchor_Points, anchor_left)
+                    
+                    #================================#
+                    #     Masking off finder map     #
+                    #================================#
+                    HoLine_finder[anchor_left: anchor_right + 1] = 0
+                    HoLine_finder[0:1], HoLine_finder[len(HoLine_finder) -1 : len(HoLine_finder)] = 0, 0
+                    
+                    Peak_Number = Peak_Number + 1
+                    
+                    if print_progress > 0:
+                        print('Peak Number = ' +str(Peak_Number) + '    value = (' +str(HoLine[max_index])+ ').')
+                        print('Max index = ' + str(max_index))
+                        print ('Anchor Left = ' + str(anchor_left) + '. Anchor Right = ' + str(anchor_right) +'.') 
+
+                #====================================#
+                #  Editing Horizontal Anchor Points  #
+                #====================================#                         
+                Horizontal_Anchor_Points = np.append(Horizontal_Anchor_Points, [0 , (len(HoLine) - 1)])
+                Horizontal_Anchor_Points = np.unique(np.sort(Horizontal_Anchor_Points))
+                iteration1 = range(0 , len(Horizontal_Anchor_Points))
+                for i in iteration1:
+                    if Horizontal_Anchor_Points[i] == len(HoLine):
+                        Horizontal_Anchor_Points[i] = Horizontal_Anchor_Points[i] - 1
+                               
+                #====================================#
+                #  Y- values for Horizontal Anchors  #
+                #====================================# 
+                Horizontal_Anchor_Points_y = []
+                iteration1 = range(0 , len(Horizontal_Anchor_Points))
+                for i in iteration1:
+                    Horizontal_Anchor_Points_y = np.append(Horizontal_Anchor_Points_y, HoLine[Horizontal_Anchor_Points[i]])
+                             
+                #====================================#
+                #       Fit Horizontal Anchors       #
+                #====================================# 
+                horizontal_fit= interpolate.interp1d(Horizontal_Anchor_Points, Horizontal_Anchor_Points_y) 
+                horizontal_fit_x = np.linspace (0, (len(HoLine) -1) , 1000)
+                
+                #====================================#
+                #         Flattern the Fit!          #
+                #====================================#
+                iteration_HoLine = range(0, len(HoLine)-1)
+                for i in iteration_HoLine:
+                    if horizontal_fit([i]) > HoLine[i]:
+                        Horizontal_Anchor_Points= np.append(Horizontal_Anchor_Points, i)
+                
+                Horizontal_Anchor_Points = np.unique(np.sort(Horizontal_Anchor_Points))
+                        
+                Horizontal_Anchor_Points_y = []
+                iteration1 = range(0 , len(Horizontal_Anchor_Points))
+                for i in iteration1:
+                    Horizontal_Anchor_Points_y = np.append(Horizontal_Anchor_Points_y, HoLine[Horizontal_Anchor_Points[i]])
+                
+                horizontal_fit= interpolate.interp1d(Horizontal_Anchor_Points, Horizontal_Anchor_Points_y) 
+                horizontal_fit_x = np.linspace (0, (len(HoLine) -1) , 1000)
+            
+                #====================================#
+                #    Horizontal Background Values    #
+                #====================================# 
+                Horizontal_Background = np.zeros(len(HoLine))
+                iteration = range(0, len(HoLine) -1)
+                for i in iteration:
+                    Horizontal_Background[i] = horizontal_fit(i)
+
+                #====================================#
+                #     Corrected Horizontal Trace     #
+                #====================================#
+                HoLine_Corrected = copy.deepcopy(HoLine)
+                HoLine_Corrected = HoLine_Corrected - Horizontal_Background
+                
+                for i in iteration:
+                    if HoLine_Corrected[i] < Background:
+                        HoLine_Corrected[i] = 1e-6
+         
+                #====================================#
+                # Input Horizontal into Corrected Map#
+                #====================================#                                                 
+                for i in iteration_HoLine:
+                    if HoLine_Corrected[i] < Ti_Map_Corrected[y2 , :][i]:
+                        Ti_Map_Corrected[y2, :][i] = HoLine_Corrected[i]
+                        
+                #====================================#
+                #     Vertical Anchor Points       #
+                #====================================#              
+                Vertical_Anchor_Points = 0 , len(VeLine) - 1
+                Peak_Number = 0
+
+                while np.max(VeLine_finder) > 0 :
+                    iteration1 = range(0, len(VeLine))
+                    for i in iteration1:
+                        if VeLine_finder[i] == np.max(VeLine_finder):
+                            max_index = i
+                    right = VeLine_finder[max_index : ]
+                    left  = np.flipud(VeLine_finder[ : max_index +1])
+               
+                    #================================#
+                    #     Right anchor iteration     #
+                    #================================#
+                    iteration_right = range(0, len(right)-1)
+                    for i in iteration_right:
+                        if right[i+1] == 0:
+                            anchor_right = i + 1
+                            break
+                        elif right[0] * constant < right[i+1]:
+                            pass
+                        elif right[i+1] > right[i]:
+                            anchor_right = i
+                            break
+                        elif right[0] > hot_particles:
+                            if right[i+1] < right[0]*0.005:
+                                anchor_right = i +1
+                                break
+                        else:
+                            pass
+                        
+                    
+                    if anchor_right == 0:
+                        anchor_right = max_index
+                    elif anchor_right > len(right):
+                        anchor_right = len(right) + max_index
+                    else:
+                        anchor_right = anchor_right + max_index                              
+                    Vertical_Anchor_Points = np.append(Vertical_Anchor_Points, anchor_right)
+                    
+                    #================================#
+                    #     Left anchor iteration      #
+                    #================================#
+                    iteration_left = range(0, len(left)-1)
+                    for i in iteration_left:
+                        if left[i+1] == 0:
+                            anchor_left = i + 1
+                            break
+                        elif left[0] * constant < left[i+1]:
+                            pass
+                        elif left[i+1] > left[i]:
+                            anchor_left = i
+                            break
+                        elif left[0] > hot_particles:
+                            if left[i+1] < left[0]*0.005:
+                                anchor_left = i +1
+                                break
+                        else:
+                            pass
+                            
+                    if anchor_left == 0:
+                        anchor_left = max_index
+                    elif (max_index - anchor_left) < 0:
+                        anchor_left = max_index
+                    else:
+                        anchor_left = max_index - anchor_left
+                    Vertical_Anchor_Points= np.append(Vertical_Anchor_Points, anchor_left)
+                    
+                    #================================#
+                    #     Masking off finder map     #
+                    #================================#
+                    VeLine_finder[anchor_left: anchor_right + 1] = 0
+                    VeLine_finder[0:1], VeLine_finder[len(VeLine_finder) -1 : len(VeLine_finder)] = 0, 0
+                    
+                    Peak_Number = Peak_Number + 1
+                    
+                    if print_progress > 0:
+                        print('Peak Number = ' +str(Peak_Number) + '    value = (' +str(HoLine[max_index])+ ').')
+                        print('Max index = ' + str(max_index))
+                        print ('Anchor Left = ' + str(anchor_left) + '. Anchor Right = ' + str(anchor_right) +'.') 
+
+                #====================================#
+                #   Editing Vertical Anchor Points   #
+                #====================================#                         
+                Vertical_Anchor_Points = np.append(Vertical_Anchor_Points, [0 , (len(VeLine) - 1)])
+                Vertical_Anchor_Points = np.unique(np.sort(Vertical_Anchor_Points))
+                iteration1 = range(0 , len(Vertical_Anchor_Points))
+                for i in iteration1:
+                    if Vertical_Anchor_Points[i] == len(VeLine):
+                        Vertical_Anchor_Points[i] = Vertical_Anchor_Points[i] - 1
+                               
+                #====================================#
+                #   Y- values for Vertical Anchors   #
+                #====================================# 
+                Vertical_Anchor_Points_y = []
+                iteration1 = range(0 , len(Vertical_Anchor_Points))
+                for i in iteration1:
+                    Vertical_Anchor_Points_y = np.append(Vertical_Anchor_Points_y, VeLine[Vertical_Anchor_Points[i]])
+                             
+                #====================================#
+                #         Fit Vertical Anchors       #
+                #====================================# 
+                vertical_fit= interpolate.interp1d(Vertical_Anchor_Points, Vertical_Anchor_Points_y) 
+                vertical_fit_x = np.linspace (0, (len(VeLine) -1) , 1000)
+                
+                #====================================#
+                #         Flattern the Fit!          #
+                #====================================#
+                iteration_VeLine = range(0, len(VeLine)-1)
+                for i in iteration_VeLine:
+                    if vertical_fit([i]) > VeLine[i]:
+                        Vertical_Anchor_Points= np.append(Vertical_Anchor_Points, i)
+                
+                Vertical_Anchor_Points = np.unique(np.sort(Vertical_Anchor_Points))
+                        
+                Vertical_Anchor_Points_y = []
+                iteration1 = range(0 , len(Vertical_Anchor_Points))
+                for i in iteration1:
+                    Vertical_Anchor_Points_y = np.append(Vertical_Anchor_Points_y, VeLine[Vertical_Anchor_Points[i]])
+                
+                vertical_fit= interpolate.interp1d(Vertical_Anchor_Points, Vertical_Anchor_Points_y) 
+                vertical_fit_x = np.linspace (0, (len(VeLine) -1) , 1000)                
+
+                #====================================#
+                #     Vertical Background Values     #
+                #====================================# 
+                Vertical_Background = np.zeros(len(VeLine))
+                iteration = range(0, len(VeLine) -1)
+                for i in iteration:
+                    Vertical_Background[i] = vertical_fit(i)
+
+                #====================================#
+                #      Corrected Vertical Trace      #
+                #====================================#
+                VeLine_Corrected = copy.deepcopy(VeLine)
+                VeLine_Corrected = VeLine_Corrected - Vertical_Background
+                
+                for i in iteration:
+                    if VeLine_Corrected[i] < Background:
+                        VeLine_Corrected[i] = 1e-6
+                        
+                #====================================#
+                #  Input Vertical into Corrected Map #
+                #====================================#
+                for i in iteration_VeLine:
+                    if VeLine_Corrected[i] < Ti_Map_Corrected[: , x2][i]:
+                        Ti_Map_Corrected[:, x2][i] = VeLine_Corrected[i]
+                
+                #====================================#
+                # Horizontal & Vertical Finder Mask  #
+                #====================================#                
+                Ti_Map_Finder[: , x2] = 0
+                Ti_Map_Finder[y2 , :] = 0
+                
+                print('Correction Number = ' + str(number_of_corrections_done) + '.')
+
+
+                break              
+  
+if Show_figs_in_loop > 0:
+    plt.figure()
+    plt.subplot(211)
+    plt.title('Horizontal Trace Correction: ' + str(number_of_corrections_done) +'.')
+    plt.semilogy()
+    plt.plot(HoLineX, HoLine, 'k')
+    plt.plot(horizontal_fit_x, horizontal_fit(horizontal_fit_x), 'r')
+    plt.show()        
+        
+    plt.subplot(212)
+    plt.title('Vertical Trace Correction: ' + str(number_of_corrections_done) +'.')
+    plt.semilogy()
+    plt.plot(VeLineX, VeLine, 'k')
+    plt.plot(vertical_fit_x, vertical_fit(vertical_fit_x), 'r')
+
+    plt.figure()
+    plt.title('Corrected Map')
+    plt.imshow(Ti_Map_Corrected, interpolation= 'none', norm=LogNorm(vmin=1e-5, vmax=0.03))
+    plt.colorbar()
+
+    plt.figure()
+    plt.title('Titanium Finder Map')
+    plt.imshow(Ti_Map_Finder, interpolation= 'none', norm=LogNorm(vmin=1e-5, vmax=0.03))
+
+
+
+
+
